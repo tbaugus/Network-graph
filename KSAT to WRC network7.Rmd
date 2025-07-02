@@ -1,0 +1,211 @@
+---
+title: "KSAT to WRC network graphv7"
+author: "Tabitha Baugus"
+date: "2024-11-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+######read in data and libraries#####
+library(visNetwork)
+library(dplyr)
+library(tidyr)
+library(igraph)
+
+#read your CSV file
+data <- read.csv("C:/Users/TabithaBaugus/Desktop/Network graph/WRC-KSAT map csv v2.csv", check.names = FALSE, header = TRUE)
+WRC_names <- read.csv("C:/Users/TabithaBaugus/Desktop/Network graph/WRC_titles.csv")
+
+#handle missing values
+data[is.na(data)] <- 0
+
+#reformat data for merging
+#Set the first row as column names
+colnames(data) <- data[1,] 
+#remove the first row
+data <- data[-1,]
+
+#merge dataframes
+merged_df <- merge(data, WRC_names, by.x = "0", by.y = "DCWF.Code", all = TRUE)
+work.role <- which(colnames(merged_df) == "Work.Role")
+print(work.role)
+```
+
+```{r}
+########data pre-processing########
+
+#create nodes dataframe
+wrc_nodes <- data.frame(
+  id = paste0("WRC_", merged_df[,1]),
+  label = paste(merged_df[,1], merged_df[[work.role]], sep = ": "),
+  group = "WRC"
+)
+
+
+ksat_nodes <- data.frame(
+  id = paste0("KSAT_", colnames(merged_df)[-1]),
+  label = colnames(merged_df)[-1],
+  group = "KSAT"
+)
+
+nodes <- rbind(ksat_nodes, wrc_nodes)
+
+#convert cols to character datatype
+# merged_df %>%
+#   mutate(across(-1, as.character)) %>%
+#   pivot_longer(cols = -1, names_to = "to", values_to = "value")
+
+
+#create edges dataframe
+edges <- merged_df %>%
+  pivot_longer(
+    cols = -1, 
+    names_to = "to", 
+    values_to = "value",
+    values_transform = list(value = as.character)
+  ) %>%
+  filter(value != "0") %>%  # Assuming 0 means no relationship
+  rename(from = 1) %>%
+  mutate(
+    from = paste0("KSAT_", from),
+    to = paste0("WRC_", to)
+  ) %>%
+  select(from, to)
+```
+
+```{r}
+# Find vertices in edges not present in nodes
+missing_vertices <- setdiff(unique(c(edges$from, edges$to)), nodes$id)
+print(missing_vertices)
+```
+
+```{r}
+#create graph
+graph <- graph_from_data_frame(d = edges, vertices = nodes, directed = FALSE)
+#calculate layout using a force-directed algorithm
+layout <- layout_with_fr(graph)
+
+#add x and y coordinates to your nodes dataframe
+nodes$x <- layout[,1] * 100  # Scaling factor for better visualization
+nodes$y <- layout[,2] * 100
+```
+
+```{r}
+############data exploration#####################
+
+# Check for duplicate IDs
+duplicate_ids <- nodes$id[duplicated(nodes$id)]
+if(length(duplicate_ids) > 0) {
+  print("Duplicate IDs found:")
+  print(duplicate_ids)
+} else {
+  print("No duplicate IDs found. All node IDs are unique.")
+}
+
+#check for duplicate combinations of id and group
+duplicate_id_groups <- nodes[duplicated(nodes[c("id", "group")]) | duplicated(nodes[c("id", "group")], fromLast = TRUE), ]
+if(nrow(duplicate_id_groups) > 0) {
+  print("Duplicate ID-group combinations found:")
+  print(duplicate_id_groups)
+} else {
+  print("No duplicate ID-group combinations found.")
+}
+
+# Find KSATs with no connections
+ksats_with_no_connections <- setdiff(ksat_nodes$id, unique(edges$from))
+
+# Count KSATs with no connections
+count_ksats_no_connections <- length(ksats_with_no_connections)
+
+# Get the list of KSATs with no connections (without the "KSAT_" prefix)
+list_ksats_no_connections <- gsub("KSAT_", "", ksats_with_no_connections)
+
+# Print the results
+cat("Number of KSATs with no work role codes:", count_ksats_no_connections, "\n\n")
+cat("List of KSATs with no work role codes:\n")
+print(list_ksats_no_connections)
+
+# Count connections for each KSAT
+ksat_connections <- edges %>%
+  group_by(from) %>%
+  summarise(connection_count = n()) %>%
+  arrange(desc(connection_count))
+
+# Find the KSAT with the most connections
+ksat_most_connections <- ksat_connections %>%
+  slice(1)
+
+# Get the top 10 KSATs with the most connections
+top_10_ksats <- ksat_connections %>%
+  slice_head(n = 10)
+
+# Print the results
+cat("KSAT with the most connections:\n")
+print(ksat_most_connections %>% 
+        mutate(from = gsub("KSAT_", "", from)))
+
+cat("\nTop 10 KSATs with the most connections:\n")
+print(top_10_ksats %>% 
+        mutate(from = gsub("KSAT_", "", from)))
+```
+
+```{r}
+######build network graph############
+visnet <- visNetwork(nodes = nodes, edges = edges) %>%
+  visGroups(groupname = "KSAT", color = "#1A3654") %>%
+  visGroups(groupname = "WRC", color = "#DD3608") %>%
+  visNodes(
+    shape = "circle",
+    font = list(color = "white", size = 10)
+  ) %>%
+  visEdges(color = list(color = "#999999", highlight = "#BA4347")) %>%
+  visOptions(
+    highlightNearest = list(enabled = TRUE, degree = 1, hover = TRUE),
+    selectedBy = "label"
+  ) %>%
+  visLayout(randomSeed = 123) %>%
+  visInteraction(dragNodes = TRUE, dragView = TRUE, zoomView = TRUE) %>%
+  visPhysics(stabilization = TRUE) %>%
+  visLegend(
+    useGroups = FALSE,
+    width = 0.1,
+    position = "right",
+    addNodes = list(
+      list(label = "KSAT", color = "#1A3654", shape = "circle", font = list(color = "white")),
+      list(label = "WRC", color = "#DD3608", shape = "circle", font = list(color = "white"))
+    )
+  ) %>%
+  visEvents(stabilizationIterationsDone = "function() {
+    this.setOptions( { physics: false } );
+  }")
+```
+
+```{r}
+#extract nodes and  edges data
+network_data <- list(
+  nodes = visnet$x$nodes,
+  edges = visnet$x$edges
+)
+```
+
+```{r}
+#convert data to JSON
+library(jsonlite)
+json_network_graph <- toJSON(network_data, pretty = TRUE)
+```
+
+```{r}
+writeLines(json_network_graph, "network_graph.json")
+```
+
+```{r}
+# Display the plot
+visnet
+
+#save as html file
+visSave(visnet, file = "KSAT to WRC networkv7.html", selfcontained = TRUE)
+```
